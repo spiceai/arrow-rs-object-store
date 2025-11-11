@@ -184,6 +184,8 @@ pub struct AmazonS3Builder {
     encryption_customer_key_base64: Option<String>,
     /// When set to true, charge requester for bucket operations
     request_payer: ConfigValue<bool>,
+    /// When set to true, use ListObjectVersions API to include version information
+    list_with_versions: ConfigValue<bool>,
     /// The [`HttpConnector`] to use
     http_connector: Option<Arc<dyn HttpConnector>>,
 }
@@ -391,6 +393,16 @@ pub enum AmazonS3ConfigKey {
     /// - `request_payer`
     RequestPayer,
 
+    /// Use ListObjectVersions API to include version information in list operations
+    ///
+    /// When enabled, list operations will use the ListObjectVersions API instead of
+    /// ListObjectsV2, which includes version information for each object.
+    ///
+    /// Supported keys:
+    /// - `aws_list_with_versions`
+    /// - `list_with_versions`
+    ListWithVersions,
+
     /// Client options
     Client(ClientConfigKey),
 
@@ -426,6 +438,7 @@ impl AsRef<str> for AmazonS3ConfigKey {
             Self::ConditionalPut => "aws_conditional_put",
             Self::DisableTagging => "aws_disable_tagging",
             Self::RequestPayer => "aws_request_payer",
+            Self::ListWithVersions => "aws_list_with_versions",
             Self::Client(opt) => opt.as_ref(),
             Self::Encryption(opt) => opt.as_ref(),
         }
@@ -466,6 +479,7 @@ impl FromStr for AmazonS3ConfigKey {
             "aws_conditional_put" | "conditional_put" => Ok(Self::ConditionalPut),
             "aws_disable_tagging" | "disable_tagging" => Ok(Self::DisableTagging),
             "aws_request_payer" | "request_payer" => Ok(Self::RequestPayer),
+            "aws_list_with_versions" | "list_with_versions" => Ok(Self::ListWithVersions),
             // Backwards compatibility
             "aws_allow_http" => Ok(Self::Client(ClientConfigKey::AllowHttp)),
             "aws_server_side_encryption" => Ok(Self::Encryption(
@@ -619,6 +633,9 @@ impl AmazonS3Builder {
             AmazonS3ConfigKey::RequestPayer => {
                 self.request_payer = ConfigValue::Deferred(value.into())
             }
+            AmazonS3ConfigKey::ListWithVersions => {
+                self.list_with_versions = ConfigValue::Deferred(value.into())
+            }
             AmazonS3ConfigKey::Encryption(key) => match key {
                 S3EncryptionConfigKey::ServerSideEncryption => {
                     self.encryption_type = Some(ConfigValue::Deferred(value.into()))
@@ -685,6 +702,7 @@ impl AmazonS3Builder {
             AmazonS3ConfigKey::ConditionalPut => Some(self.conditional_put.to_string()),
             AmazonS3ConfigKey::DisableTagging => Some(self.disable_tagging.to_string()),
             AmazonS3ConfigKey::RequestPayer => Some(self.request_payer.to_string()),
+            AmazonS3ConfigKey::ListWithVersions => Some(self.list_with_versions.to_string()),
             AmazonS3ConfigKey::Encryption(key) => match key {
                 S3EncryptionConfigKey::ServerSideEncryption => {
                     self.encryption_type.as_ref().map(ToString::to_string)
@@ -982,6 +1000,20 @@ impl AmazonS3Builder {
         self
     }
 
+    /// Set whether to use ListObjectVersions API for listing operations.
+    ///
+    /// When enabled, list operations will use the ListObjectVersions API instead of
+    /// ListObjectsV2, which includes version information for each object.
+    ///
+    /// This is useful when working with versioned S3 buckets and you need to track
+    /// object versions.
+    ///
+    /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html>
+    pub fn with_list_versions(mut self, enabled: bool) -> Self {
+        self.list_with_versions = ConfigValue::Parsed(enabled);
+        self
+    }
+
     /// The [`HttpConnector`] to use
     ///
     /// On non-WASM32 platforms uses [`reqwest`] by default, on WASM32 platforms must be provided
@@ -1163,6 +1195,7 @@ impl AmazonS3Builder {
             conditional_put: self.conditional_put.get()?,
             encryption_headers,
             request_payer: self.request_payer.get()?,
+            list_with_versions: self.list_with_versions.get()?,
         };
 
         let http_client = http.connect(&config.client_options)?;

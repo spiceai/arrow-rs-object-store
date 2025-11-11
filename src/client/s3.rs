@@ -70,8 +70,6 @@ pub struct ListContents {
     pub last_modified: DateTime<Utc>,
     #[serde(rename = "ETag")]
     pub e_tag: Option<String>,
-    #[serde(rename = "VersionId")]
-    pub version_id: Option<String>,
 }
 
 impl TryFrom<ListContents> for ObjectMeta {
@@ -83,9 +81,86 @@ impl TryFrom<ListContents> for ObjectMeta {
             last_modified: value.last_modified,
             size: value.size,
             e_tag: value.e_tag,
-            version: value.version_id,
+            version: None,
         })
     }
+}
+
+/// Response from `ListObjectVersions` API
+/// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html>
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ListVersionsResponse {
+    #[serde(default)]
+    pub version: Vec<ObjectVersion>,
+    #[serde(default)]
+    pub delete_marker: Vec<DeleteMarkerEntry>,
+    #[serde(default)]
+    pub common_prefixes: Vec<ListPrefix>,
+    pub next_key_marker: Option<String>,
+    pub next_version_id_marker: Option<String>,
+}
+
+impl TryFrom<ListVersionsResponse> for ListResult {
+    type Error = crate::Error;
+
+    fn try_from(value: ListVersionsResponse) -> Result<Self> {
+        let common_prefixes = value
+            .common_prefixes
+            .into_iter()
+            .map(|x| Ok(Path::parse(x.prefix)?))
+            .collect::<Result<_>>()?;
+
+        // Combine versions and delete markers, converting to ObjectMeta
+        let mut objects: Vec<ObjectMeta> = Vec::new();
+
+        for version in value.version {
+            objects.push(version.try_into()?);
+        }
+
+        // Delete markers can also be included if needed
+        // For now, we skip them as they represent deleted objects
+
+        Ok(Self {
+            common_prefixes,
+            objects,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ObjectVersion {
+    pub key: String,
+    pub version_id: String,
+    pub is_latest: bool,
+    pub last_modified: DateTime<Utc>,
+    pub size: u64,
+    #[serde(rename = "ETag")]
+    pub e_tag: Option<String>,
+}
+
+impl TryFrom<ObjectVersion> for ObjectMeta {
+    type Error = crate::Error;
+
+    fn try_from(value: ObjectVersion) -> Result<Self> {
+        Ok(Self {
+            location: Path::parse(value.key)?,
+            last_modified: value.last_modified,
+            size: value.size,
+            e_tag: value.e_tag,
+            version: Some(value.version_id),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DeleteMarkerEntry {
+    pub key: String,
+    pub version_id: String,
+    pub is_latest: bool,
+    pub last_modified: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
