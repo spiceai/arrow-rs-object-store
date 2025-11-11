@@ -30,7 +30,7 @@ use crate::client::list::ListClient;
 use crate::client::retry::{RetryContext, RetryExt};
 use crate::client::s3::{
     CompleteMultipartUpload, CompleteMultipartUploadResult, CopyPartResult,
-    InitiateMultipartUploadResult, ListResponse, PartMetadata,
+    InitiateMultipartUploadResult, ListResponse, ListVersionsResponse, PartMetadata,
 };
 use crate::client::{GetOptionsExt, HttpClient, HttpError, HttpResponse};
 use crate::list::{PaginatedListOptions, PaginatedListResult};
@@ -206,6 +206,7 @@ pub(crate) struct S3Config {
     pub copy_if_not_exists: Option<S3CopyIfNotExists>,
     pub conditional_put: S3ConditionalPut,
     pub request_payer: bool,
+    pub list_with_versions: bool,
     pub(super) encryption_headers: S3EncryptionHeaders,
 }
 
@@ -885,8 +886,27 @@ impl GetClient for S3Client {
 
 #[async_trait]
 impl ListClient for Arc<S3Client> {
-    /// Make an S3 List request <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>
+    /// Make an S3 List request
+    ///
+    /// Uses ListObjectsV2 by default: <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>
+    ///
+    /// Uses ListObjectVersions when list_with_versions is enabled: <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html>
     async fn list_request(
+        &self,
+        prefix: Option<&str>,
+        opts: PaginatedListOptions,
+    ) -> Result<PaginatedListResult> {
+        if self.config.list_with_versions {
+            self.list_versions_request(prefix, opts).await
+        } else {
+            self.list_objects_v2_request(prefix, opts).await
+        }
+    }
+}
+
+impl S3Client {
+    /// Make an S3 ListObjectsV2 request
+    async fn list_objects_v2_request(
         &self,
         prefix: Option<&str>,
         opts: PaginatedListOptions,
@@ -938,6 +958,84 @@ impl ListClient for Arc<S3Client> {
             .map_err(|source| Error::InvalidListResponse { source })?;
 
         let token = response.next_continuation_token.take();
+
+        Ok(PaginatedListResult {
+            result: response.try_into()?,
+            page_token: token,
+        })
+    }
+
+    /// Make an S3 ListObjectVersions request
+    async fn list_versions_request(
+        &self,
+        prefix: Option<&str>,
+        opts: PaginatedListOptions,
+    ) -> Result<PaginatedListResult> {
+        let credential = self.config.get_session_credential().await?;
+        let url = self.config.bucket_endpoint.clone();
+
+        let mut query = Vec::with_capacity(4);
+
+        query.push(("versions", ""));
+
+        // Parse page_token which contains both key-marker and version-id-marker
+        if let Some(token) = &opts.page_token {
+            // Token format: "key-marker|version-id-marker" or just "key-marker"
+            if let Some((key_marker, version_marker)) = token.split_once('|') {
+                if !key_marker.is_empty() {
+                    query.push(("key-marker", key_marker));
+                }
+                if !version_marker.is_empty() {
+                    query.push(("version-id-marker", version_marker));
+                }
+            } else if !token.is_empty() {
+                query.push(("key-marker", token.as_str()));
+            }
+        } else if let Some(offset) = &opts.offset {
+            // Use offset as initial key-marker when no pagination token
+            query.push(("key-marker", offset.as_ref()))
+        }
+
+        if let Some(d) = &opts.delimiter {
+            query.push(("delimiter", d.as_ref()))
+        }
+
+        if let Some(prefix) = prefix {
+            query.push(("prefix", prefix))
+        }
+
+        let max_keys_str;
+        if let Some(max_keys) = &opts.max_keys {
+            max_keys_str = max_keys.to_string();
+            query.push(("max-keys", max_keys_str.as_ref()))
+        }
+
+        let response = self
+            .client
+            .request(Method::GET, &url)
+            .extensions(opts.extensions)
+            .query(&query)
+            .with_aws_sigv4(credential.authorizer(), None)
+            .send_retry(&self.config.retry_config)
+            .await
+            .map_err(|source| Error::ListRequest { source })?
+            .into_body()
+            .bytes()
+            .await
+            .map_err(|source| Error::ListResponseBody { source })?;
+
+        let response: ListVersionsResponse = quick_xml::de::from_reader(response.reader())
+            .map_err(|source| Error::InvalidListResponse { source })?;
+
+        // Create page token from next markers
+        let token = match (
+            response.next_key_marker.as_ref(),
+            response.next_version_id_marker.as_ref(),
+        ) {
+            (Some(key), Some(version)) => Some(format!("{}|{}", key, version)),
+            (Some(key), None) => Some(key.clone()),
+            _ => None,
+        };
 
         Ok(PaginatedListResult {
             result: response.try_into()?,
