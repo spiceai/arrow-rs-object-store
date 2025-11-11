@@ -70,6 +70,8 @@ pub struct ListContents {
     pub last_modified: DateTime<Utc>,
     #[serde(rename = "ETag")]
     pub e_tag: Option<String>,
+    #[serde(rename = "VersionId")]
+    pub version_id: Option<String>,
 }
 
 impl TryFrom<ListContents> for ObjectMeta {
@@ -81,7 +83,7 @@ impl TryFrom<ListContents> for ObjectMeta {
             last_modified: value.last_modified,
             size: value.size,
             e_tag: value.e_tag,
-            version: None,
+            version: value.version_id,
         })
     }
 }
